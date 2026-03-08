@@ -155,9 +155,63 @@ Video URL
 └──────────────────────────────────────┘
 ```
 
-- **Transcription** is 100% local via Whisper. No data sent anywhere.
-- **Summarize** and **Ask** use Claude Code CLI. Your transcript and context are sent to Claude for processing.
-- **Library** — every transcript auto-saves to `~/.tldl/library/` so they accumulate over time.
+### Privacy first
+
+TLDL is designed so your data stays yours.
+
+- **Transcription is 100% local.** Whisper runs on your machine. The audio is downloaded to a temp directory, transcribed, and deleted. Nothing is uploaded to any server.
+- **Your profile (`~/.tldl/me.md`) never leaves your machine.** It's read locally and included in prompts to Claude only when you explicitly click summarize or ask. It's never stored remotely, indexed, or shared.
+- **Your library (`~/.tldl/library/`) is plain markdown files on disk.** No database, no cloud sync, no telemetry. You own the files. `cat` them, `grep` them, back them up however you want.
+- **No accounts, no API keys, no sign-ups.** Transcription works with zero configuration. Summarize and chat work through your existing Claude Code CLI auth — no separate API key to manage.
+
+### Claude Code CLI as the backend
+
+TLDL doesn't call the Anthropic API directly. It shells out to [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude --print`).
+
+Why this matters:
+
+- **No API key management.** If you have Claude Code installed and authenticated, TLDL just works. No `.env` files, no key rotation, no billing surprises from a leaked key.
+- **You use your existing Claude subscription.** No separate billing. No middleman service taking a cut.
+- **Model selection is flexible.** TLDL uses `claude --print --model sonnet` by default — fast and cheap. You can change this in the code to use any model Claude Code supports.
+- **It's a pattern, not a dependency.** Any tool that accepts stdin and returns stdout could replace Claude here. Want to use a local model instead? Swap one subprocess call.
+
+### Peek under the hood
+
+The entire tool is two Python files. No framework, no build step, no infrastructure.
+
+**`tldl`** (CLI entry point, ~170 lines)
+- Parses args, downloads audio via `yt-dlp -x --audio-format wav`, runs `whisper.load_model().transcribe()`, formats segments into timestamped markdown. That's it.
+
+**`app.py`** (Web UI + API, ~700 lines)
+- Flask server with 4 endpoints:
+  - `POST /api/transcribe` — kicks off a background thread that downloads + transcribes. Returns a job ID.
+  - `GET /api/status/<id>` — poll for progress. Returns `running`, `done`, or `error` with the transcript.
+  - `POST /api/summarize` — pipes transcript to `claude --print` with a summarization prompt.
+  - `POST /api/chat` — builds a prompt from: system instructions + `~/.tldl/me.md` + transcript + conversation history. Pipes it to `claude --print`. Returns the response.
+- The HTML/CSS/JS is inlined in a single template string. No React, no npm, no build. Open `view-source:` and read the whole frontend in 5 minutes.
+- Transcripts auto-save to `~/.tldl/library/` as plain `.md` files.
+
+**The chat prompt structure:**
+
+```
+System: You are helping the user understand a video they watched.
+Answer questions grounded in the transcript below.
+Be concise and direct. Use markdown formatting.
+When relevant, connect ideas to the user's background.
+
+Here is who the user is:
+{contents of ~/.tldl/me.md}
+
+Here is the transcript:
+{full transcript}
+
+User: What was their main argument?
+Assistant: ...
+User: How does this apply to my project?
+Assistant: ...
+```
+
+The profile and transcript are included in every turn. Conversation history accumulates so follow-up questions work naturally. No embeddings, no vector DB, no RAG — just a well-structured prompt with the right context.
 
 ---
 
