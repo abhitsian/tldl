@@ -11,12 +11,45 @@ import threading
 import uuid
 from pathlib import Path
 
+import json
+
 from flask import Flask, jsonify, render_template_string, request, send_file
 
 app = Flask(__name__)
 
+TLDL_DIR = Path.home() / ".tldl"
+LIBRARY_DIR = TLDL_DIR / "library"
+PROFILE_PATH = TLDL_DIR / "me.md"
+
 # In-memory job store
 jobs: dict[str, dict] = {}
+
+
+def load_profile() -> str:
+    """Load user profile from ~/.tldl/me.md."""
+    if PROFILE_PATH.exists():
+        text = PROFILE_PATH.read_text().strip()
+        # Filter out comment-only lines
+        lines = [l for l in text.split("\n") if not l.strip().startswith("<!--")]
+        content = "\n".join(lines).strip()
+        if content:
+            return content
+    return ""
+
+
+def save_to_library(title: str, markdown: str):
+    """Save transcript to ~/.tldl/library/."""
+    LIBRARY_DIR.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r'[^\w\s-]', '', title)[:60].strip().replace(' ', '_').lower()
+    if not safe:
+        safe = "untitled"
+    path = LIBRARY_DIR / f"{safe}.md"
+    # Avoid overwriting — append a suffix
+    counter = 1
+    while path.exists():
+        path = LIBRARY_DIR / f"{safe}_{counter}.md"
+        counter += 1
+    path.write_text(markdown)
 
 HTML = """
 <!DOCTYPE html>
@@ -278,6 +311,89 @@ HTML = """
     margin: 12px 0 6px;
     color: #e0e0e0;
   }
+
+  .chat-panel {
+    display: none;
+    background: #0a0f1a;
+    border: 1px solid #1a2a3a;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    overflow: hidden;
+  }
+
+  .chat-panel.visible { display: block; }
+
+  .chat-messages {
+    max-height: 360px;
+    overflow-y: auto;
+    padding: 16px;
+  }
+
+  .chat-messages::-webkit-scrollbar { width: 6px; }
+  .chat-messages::-webkit-scrollbar-track { background: transparent; }
+  .chat-messages::-webkit-scrollbar-thumb { background: #1a2a3a; border-radius: 3px; }
+
+  .chat-msg {
+    margin-bottom: 14px;
+    font-size: 0.85rem;
+    line-height: 1.6;
+  }
+
+  .chat-msg.user {
+    color: #7aa2f7;
+  }
+
+  .chat-msg.user::before {
+    content: 'you: ';
+    font-weight: 600;
+    color: #5a82d7;
+  }
+
+  .chat-msg.assistant {
+    color: #c0d0e8;
+    padding-left: 0;
+  }
+
+  .chat-msg.assistant p { margin-bottom: 6px; }
+  .chat-msg.assistant ul { margin: 6px 0 6px 18px; }
+  .chat-msg.assistant li { margin-bottom: 3px; }
+  .chat-msg.assistant strong { color: #9ab8e8; }
+
+  .chat-msg.thinking {
+    color: #555;
+    font-style: italic;
+  }
+
+  .chat-input-row {
+    display: flex;
+    border-top: 1px solid #1a2a3a;
+  }
+
+  .chat-input-row input {
+    flex: 1;
+    background: #0d1220;
+    border: none;
+    color: #e0e0e0;
+    padding: 12px 16px;
+    font-family: inherit;
+    font-size: 0.85rem;
+    outline: none;
+  }
+
+  .chat-input-row button {
+    background: #1a2a3a;
+    border: none;
+    color: #7aa2f7;
+    padding: 12px 20px;
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+
+  .chat-input-row button:hover { background: #243a50; }
+  .chat-input-row button:disabled { opacity: 0.3; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -314,6 +430,7 @@ HTML = """
       <button onclick="downloadMd()">download .md</button>
       <button onclick="toggleSearch()">search</button>
       <button id="summarizeBtn" onclick="summarize()">summarize</button>
+      <button id="chatBtn" onclick="toggleChat()">ask</button>
     </div>
     <div class="search-bar" id="searchBar">
       <input type="text" id="searchInput" placeholder="search transcript..." oninput="searchTranscript()">
@@ -324,6 +441,13 @@ HTML = """
         <button onclick="closeSummary()">&times;</button>
       </div>
       <div class="summary-content" id="summaryContent"></div>
+    </div>
+    <div class="chat-panel" id="chatPanel">
+      <div class="chat-messages" id="chatMessages"></div>
+      <div class="chat-input-row">
+        <input type="text" id="chatInput" placeholder="ask anything about this video..." onkeydown="if(event.key==='Enter')sendChat()">
+        <button onclick="sendChat()">send</button>
+      </div>
     </div>
     <div class="transcript" id="transcript"></div>
   </div>
@@ -343,6 +467,9 @@ function start() {
 
   document.getElementById('goBtn').disabled = true;
   document.getElementById('result').classList.remove('visible');
+  document.getElementById('chatPanel').classList.remove('visible');
+  document.getElementById('chatMessages').innerHTML = '';
+  chatHistory = [];
 
   const status = document.getElementById('status');
   status.className = 'status active';
@@ -470,6 +597,82 @@ function closeSummary() {
   document.getElementById('summaryBox').classList.remove('visible');
 }
 
+let chatHistory = [];
+
+function toggleChat() {
+  const panel = document.getElementById('chatPanel');
+  panel.classList.toggle('visible');
+  if (panel.classList.contains('visible')) {
+    document.getElementById('chatInput').focus();
+    if (chatHistory.length === 0) {
+      const msgs = document.getElementById('chatMessages');
+      msgs.innerHTML = '<div class="chat-msg thinking">ask anything about this video — answers are grounded in the transcript and your context from ~/.tldl/me.md</div>';
+    }
+  }
+}
+
+function sendChat() {
+  const input = document.getElementById('chatInput');
+  const q = input.value.trim();
+  if (!q) return;
+
+  const msgs = document.getElementById('chatMessages');
+  const sendBtn = input.nextElementSibling;
+
+  // Clear hint on first message
+  if (chatHistory.length === 0) msgs.innerHTML = '';
+
+  // Show user message
+  const userDiv = document.createElement('div');
+  userDiv.className = 'chat-msg user';
+  userDiv.textContent = q;
+  msgs.appendChild(userDiv);
+
+  chatHistory.push({ role: 'user', content: q });
+  input.value = '';
+  input.disabled = true;
+  sendBtn.disabled = true;
+
+  // Show thinking
+  const thinkDiv = document.createElement('div');
+  thinkDiv.className = 'chat-msg thinking';
+  thinkDiv.innerHTML = '<span class="spinner"></span> thinking...';
+  msgs.appendChild(thinkDiv);
+  msgs.scrollTop = msgs.scrollHeight;
+
+  fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: q, transcript: rawMarkdown, history: chatHistory })
+  })
+  .then(r => r.json())
+  .then(data => {
+    msgs.removeChild(thinkDiv);
+    const aDiv = document.createElement('div');
+    aDiv.className = 'chat-msg assistant';
+    if (data.error) {
+      aDiv.textContent = 'error: ' + data.error;
+    } else {
+      aDiv.innerHTML = data.html;
+      chatHistory.push({ role: 'assistant', content: data.markdown });
+    }
+    msgs.appendChild(aDiv);
+    msgs.scrollTop = msgs.scrollHeight;
+    input.disabled = false;
+    sendBtn.disabled = false;
+    input.focus();
+  })
+  .catch(err => {
+    msgs.removeChild(thinkDiv);
+    const eDiv = document.createElement('div');
+    eDiv.className = 'chat-msg assistant';
+    eDiv.textContent = 'error: ' + err.message;
+    msgs.appendChild(eDiv);
+    input.disabled = false;
+    sendBtn.disabled = false;
+  });
+}
+
 document.getElementById('url').addEventListener('keydown', e => {
   if (e.key === 'Enter') start();
 });
@@ -557,6 +760,12 @@ def run_transcription(job_id: str, url: str, model: str, password: str | None):
             job["markdown"] = markdown
             job["html"] = html
             job["message"] = "done"
+
+            # Auto-save to library
+            try:
+                save_to_library(title, markdown)
+            except Exception:
+                pass  # non-critical
 
     except Exception as e:
         job["status"] = "error"
@@ -662,6 +871,68 @@ def api_summarize():
         return jsonify({"error": "summarization timed out"}), 500
     except FileNotFoundError:
         return jsonify({"error": "claude CLI not found — install it first"}), 500
+
+
+@app.route("/api/chat", methods=["POST"])
+def api_chat():
+    data = request.json
+    question = data.get("question", "").strip()
+    transcript = data.get("transcript", "").strip()
+    history = data.get("history", [])
+
+    if not question or not transcript:
+        return jsonify({"error": "question and transcript required"}), 400
+
+    # Build the prompt with context layers
+    profile = load_profile()
+
+    system_parts = [
+        "You are helping the user understand a video they watched.",
+        "Answer their questions grounded in the transcript below.",
+        "Be concise and direct. Use markdown formatting.",
+        "If the transcript doesn't contain enough info to answer, say so.",
+        "When relevant, connect ideas to the user's background.",
+    ]
+
+    if profile:
+        system_parts.append(f"\nHere is who the user is:\n{profile}")
+
+    system_parts.append(f"\nHere is the transcript:\n{transcript}")
+
+    # Build conversation for Claude
+    # We pass the full context as a single prompt with conversation history
+    prompt_parts = ["\n".join(system_parts), ""]
+
+    # Add conversation history (skip the current question, it's last)
+    for msg in history[:-1]:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        prompt_parts.append(f"{role}: {msg['content']}")
+
+    prompt_parts.append(f"User: {question}")
+    prompt_parts.append("Assistant:")
+
+    full_prompt = "\n\n".join(prompt_parts)
+
+    try:
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        r = subprocess.run(
+            ["claude", "--print", "--model", "sonnet", full_prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+        if r.returncode != 0:
+            return jsonify({"error": r.stderr.strip() or "claude CLI failed"}), 500
+
+        answer_md = r.stdout.strip()
+        answer_html = markdown_to_html(answer_md)
+        return jsonify({"markdown": answer_md, "html": answer_html})
+
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "request timed out"}), 500
+    except FileNotFoundError:
+        return jsonify({"error": "claude CLI not found"}), 500
 
 
 @app.route("/api/status/<job_id>")
