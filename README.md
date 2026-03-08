@@ -4,6 +4,8 @@
 
 Transcribe any video. Summarize it. Chat with it — grounded in *your* context.
 
+![TLDL home](screenshots/01-home.png)
+
 ---
 
 ## Why TLDL?
@@ -74,6 +76,8 @@ tldl --web
    - **summarize** — key points via Claude
    - **ask** — chat with the video
 
+![Transcript result](screenshots/03-transcript.png)
+
 ### CLI
 
 ```bash
@@ -98,6 +102,14 @@ tldl "https://youtu.be/xyz" --output meeting.md
 | `--password`, `-p` | Video password (Zoom, etc.) |
 | `--output`, `-o` | Output file path |
 | `--web`, `-w` | Launch web UI |
+
+---
+
+## Chat with your video
+
+Click **ask** after transcribing. Ask anything — answers are grounded in the transcript. Multi-turn conversation, so you can dig deeper.
+
+![Chat with video](screenshots/05-chat-answer.png)
 
 ---
 
