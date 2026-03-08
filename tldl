@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""
+TLDL — Too Long; Didn't Listen.
+
+Usage:
+    tldl <url> [--password <password>] [--model <whisper_model>] [--output <file.md>]
+    tldl --web                          # launch web UI
+
+Examples:
+    tldl "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    tldl "https://zoom.us/rec/share/..." --password "abc123"
+    tldl "https://youtu.be/xyz" --model large --output notes.md
+    tldl --web
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+import re
+from pathlib import Path
+
+
+def download_audio(url: str, output_path: str, password: str | None = None) -> str:
+    """Download audio from URL using yt-dlp."""
+    cmd = [
+        "yt-dlp",
+        "-x",                        # extract audio only
+        "--audio-format", "wav",     # whisper works best with wav
+        "--audio-quality", "0",      # best quality
+        "-o", output_path,
+        "--no-playlist",             # single video only
+    ]
+
+    if password:
+        cmd.extend(["--video-password", password])
+
+    # Some sites need cookies or special handling
+    cmd.extend([
+        "--no-check-certificates",
+        "--user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    ])
+
+    cmd.append(url)
+
+    print(f"Downloading audio from: {url}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        print(f"yt-dlp stderr:\n{result.stderr}", file=sys.stderr)
+        sys.exit(f"Error: Failed to download audio. {result.stderr.splitlines()[-1] if result.stderr else ''}")
+
+    # yt-dlp may change the extension, find the actual file
+    base = Path(output_path).stem
+    parent = Path(output_path).parent
+    for f in parent.iterdir():
+        if f.stem == base:
+            return str(f)
+
+    sys.exit("Error: Downloaded audio file not found.")
+
+
+def get_video_title(url: str, password: str | None = None) -> str:
+    """Get the video title using yt-dlp."""
+    cmd = ["yt-dlp", "--get-title", "--no-playlist", url]
+    if password:
+        cmd.extend(["--video-password", password])
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return "Untitled Video"
+
+
+def transcribe_audio(audio_path: str, model: str) -> dict:
+    """Transcribe audio using OpenAI Whisper."""
+    import whisper
+
+    print(f"Loading Whisper model: {model}")
+    model_obj = whisper.load_model(model)
+
+    print("Transcribing audio (this may take a while)...")
+    result = model_obj.transcribe(audio_path, verbose=False)
+    return result
+
+
+def format_timestamp(seconds: float) -> str:
+    """Convert seconds to HH:MM:SS format."""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h > 0:
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+
+def to_markdown(title: str, url: str, result: dict) -> str:
+    """Convert transcription result to Markdown."""
+    lines = []
+    lines.append(f"# {title}\n")
+    lines.append(f"**Source:** {url}\n")
+    lines.append("---\n")
+
+    # Full transcript
+    lines.append("## Transcript\n")
+
+    segments = result.get("segments", [])
+    if not segments:
+        lines.append(result.get("text", ""))
+    else:
+        for seg in segments:
+            ts = format_timestamp(seg["start"])
+            text = seg["text"].strip()
+            lines.append(f"**[{ts}]** {text}\n")
+
+    lines.append("\n---\n")
+    lines.append(f"*Transcribed with OpenAI Whisper (language: {result.get('language', 'unknown')})*\n")
+
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="TLDL — Too Long; Didn't Listen. Transcribe video/audio to Markdown."
+    )
+    parser.add_argument("url", nargs="?", help="Video URL (YouTube, Zoom, etc.)")
+    parser.add_argument("--password", "-p", help="Video password (for Zoom, etc.)")
+    parser.add_argument(
+        "--model", "-m",
+        default="base",
+        choices=["tiny", "base", "small", "medium", "large", "turbo"],
+        help="Whisper model size (default: base). Larger = slower but more accurate."
+    )
+    parser.add_argument("--output", "-o", help="Output Markdown file path")
+    parser.add_argument("--web", "-w", action="store_true", help="Launch web UI")
+
+    args = parser.parse_args()
+
+    if args.web:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        os.execvp(sys.executable, [sys.executable, os.path.join(app_dir, "app.py")])
+
+    if not args.url:
+        parser.print_help()
+        sys.exit(1)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audio_path = os.path.join(tmpdir, "audio.wav")
+
+        # Download and get title in parallel? Keep it simple — sequential.
+        title = get_video_title(args.url, args.password)
+        audio_file = download_audio(args.url, audio_path, args.password)
+
+        result = transcribe_audio(audio_file, args.model)
+        markdown = to_markdown(title, args.url, result)
+
+    # Determine output path
+    if args.output:
+        out_path = args.output
+    else:
+        safe_title = re.sub(r'[^\w\s-]', '', title)[:60].strip().replace(' ', '_')
+        out_path = f"{safe_title}_transcript.md"
+
+    with open(out_path, "w") as f:
+        f.write(markdown)
+
+    print(f"\nTranscription saved to: {out_path}")
+
+
+if __name__ == "__main__":
+    main()
