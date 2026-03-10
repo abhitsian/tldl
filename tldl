@@ -135,12 +135,16 @@ def main():
     )
     parser.add_argument("--output", "-o", help="Output Markdown file path")
     parser.add_argument("--web", "-w", action="store_true", help="Launch web UI")
+    parser.add_argument("--context", "-c", help="Context folder for grounded chat")
 
     args = parser.parse_args()
 
     if args.web:
         app_dir = os.path.dirname(os.path.abspath(__file__))
-        os.execvp(sys.executable, [sys.executable, os.path.join(app_dir, "app.py")])
+        cmd = [sys.executable, os.path.join(app_dir, "app.py")]
+        if args.context:
+            cmd.extend(["--context", args.context])
+        os.execvp(cmd[0], cmd)
 
     if not args.url:
         parser.print_help()

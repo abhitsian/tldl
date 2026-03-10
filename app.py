@@ -20,6 +20,9 @@ app = Flask(__name__)
 TLDL_DIR = Path.home() / ".tldl"
 LIBRARY_DIR = TLDL_DIR / "library"
 PROFILE_PATH = TLDL_DIR / "me.md"
+CONTEXT_DIR: Path | None = None  # set via --context flag
+
+CONTEXT_EXTENSIONS = {".md", ".txt", ".py", ".js", ".ts", ".rb", ".go", ".rs", ".json", ".yaml", ".yml", ".toml", ".csv", ".html", ".css", ".sh", ".sql"}
 
 # In-memory job store
 jobs: dict[str, dict] = {}
@@ -394,6 +397,82 @@ HTML = """
 
   .chat-input-row button:hover { background: #243a50; }
   .chat-input-row button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .context-picker {
+    border-bottom: 1px solid #1a2a3a;
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease;
+  }
+
+  .context-picker.open { max-height: 240px; }
+
+  .context-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background: #0d1220;
+    border-bottom: 1px solid #1a2a3a;
+    cursor: pointer;
+    font-size: 0.75rem;
+    color: #556;
+    user-select: none;
+  }
+
+  .context-toggle:hover { color: #7aa2f7; }
+  .context-toggle .arrow { transition: transform 0.2s; }
+  .context-toggle.open .arrow { transform: rotate(90deg); }
+  .context-toggle .count {
+    background: #1a2a3a;
+    color: #7aa2f7;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    margin-left: 4px;
+  }
+
+  .context-list {
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 6px 8px;
+  }
+
+  .context-list::-webkit-scrollbar { width: 4px; }
+  .context-list::-webkit-scrollbar-thumb { background: #1a2a3a; border-radius: 2px; }
+
+  .context-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    color: #667;
+    cursor: pointer;
+  }
+
+  .context-item:hover { background: #111828; color: #99a; }
+
+  .context-item input[type="checkbox"] {
+    accent-color: #7aa2f7;
+    cursor: pointer;
+  }
+
+  .context-item.checked { color: #7aa2f7; }
+
+  .context-item .size {
+    margin-left: auto;
+    font-size: 0.65rem;
+    color: #445;
+  }
+
+  .no-context {
+    padding: 12px 16px;
+    font-size: 0.75rem;
+    color: #445;
+    font-style: italic;
+  }
 </style>
 </head>
 <body>
@@ -443,6 +522,14 @@ HTML = """
       <div class="summary-content" id="summaryContent"></div>
     </div>
     <div class="chat-panel" id="chatPanel">
+      <div class="context-toggle" id="contextToggle" onclick="toggleContext()">
+        <span class="arrow">&#9654;</span> context files <span class="count" id="contextCount" style="display:none">0</span>
+      </div>
+      <div class="context-picker" id="contextPicker">
+        <div class="context-list" id="contextList">
+          <div class="no-context">no context folder — start with: tldl --web --context ~/folder</div>
+        </div>
+      </div>
       <div class="chat-messages" id="chatMessages"></div>
       <div class="chat-input-row">
         <input type="text" id="chatInput" placeholder="ask anything about this video..." onkeydown="if(event.key==='Enter')sendChat()">
@@ -598,6 +685,72 @@ function closeSummary() {
 }
 
 let chatHistory = [];
+let contextFiles = [];
+let contextLoaded = false;
+
+function toggleContext() {
+  const toggle = document.getElementById('contextToggle');
+  const picker = document.getElementById('contextPicker');
+  toggle.classList.toggle('open');
+  picker.classList.toggle('open');
+
+  if (!contextLoaded) {
+    contextLoaded = true;
+    fetch('/api/context-files')
+    .then(r => r.json())
+    .then(data => {
+      const list = document.getElementById('contextList');
+      if (!data.files || data.files.length === 0) {
+        list.innerHTML = '<div class="no-context">no context folder — start with: tldl --web --context ~/folder</div>';
+        return;
+      }
+      contextFiles = data.files;
+      list.innerHTML = '';
+      data.files.forEach((f, i) => {
+        const div = document.createElement('div');
+        div.className = 'context-item';
+        div.innerHTML = '<input type="checkbox" id="ctx_' + i + '"> <label for="ctx_' + i + '">' + f.path + '</label><span class="size">' + formatSize(f.size) + '</span>';
+        div.querySelector('input').addEventListener('change', updateContextCount);
+        div.addEventListener('click', e => {
+          if (e.target.tagName !== 'INPUT') {
+            const cb = div.querySelector('input');
+            cb.checked = !cb.checked;
+            updateContextCount();
+          }
+        });
+        list.appendChild(div);
+      });
+    });
+  }
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + 'B';
+  return (bytes / 1024).toFixed(1) + 'KB';
+}
+
+function updateContextCount() {
+  const checked = document.querySelectorAll('.context-item input:checked');
+  const count = document.getElementById('contextCount');
+  if (checked.length > 0) {
+    count.textContent = checked.length;
+    count.style.display = 'inline';
+  } else {
+    count.style.display = 'none';
+  }
+  // Update visual state
+  document.querySelectorAll('.context-item').forEach(item => {
+    item.classList.toggle('checked', item.querySelector('input').checked);
+  });
+}
+
+function getSelectedContextFiles() {
+  const selected = [];
+  document.querySelectorAll('.context-item input:checked').forEach((cb, i) => {
+    if (contextFiles[i]) selected.push(contextFiles[i].path);
+  });
+  return selected;
+}
 
 function toggleChat() {
   const panel = document.getElementById('chatPanel');
@@ -643,7 +796,7 @@ function sendChat() {
   fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question: q, transcript: rawMarkdown, history: chatHistory })
+    body: JSON.stringify({ question: q, transcript: rawMarkdown, history: chatHistory, context_files: getSelectedContextFiles() })
   })
   .then(r => r.json())
   .then(data => {
@@ -873,29 +1026,72 @@ def api_summarize():
         return jsonify({"error": "claude CLI not found — install it first"}), 500
 
 
+@app.route("/api/context-files")
+def api_context_files():
+    """List files available in the context folder."""
+    if not CONTEXT_DIR or not CONTEXT_DIR.exists():
+        return jsonify({"files": [], "root": None})
+
+    files = []
+    for f in sorted(CONTEXT_DIR.rglob("*")):
+        if f.is_file() and f.suffix.lower() in CONTEXT_EXTENSIONS and not f.name.startswith("."):
+            rel = str(f.relative_to(CONTEXT_DIR))
+            size = f.stat().st_size
+            if size < 500_000:  # skip files over 500KB
+                files.append({"path": rel, "size": size})
+
+    return jsonify({"files": files, "root": str(CONTEXT_DIR)})
+
+
+def load_context_files(paths: list[str]) -> str:
+    """Load selected context files and return their contents."""
+    if not CONTEXT_DIR or not paths:
+        return ""
+
+    parts = []
+    for rel_path in paths:
+        full = CONTEXT_DIR / rel_path
+        # Prevent path traversal
+        try:
+            full.resolve().relative_to(CONTEXT_DIR.resolve())
+        except ValueError:
+            continue
+        if full.exists() and full.is_file() and full.stat().st_size < 500_000:
+            content = full.read_text(errors="replace").strip()
+            if content:
+                parts.append(f"### File: {rel_path}\n{content}")
+
+    return "\n\n".join(parts)
+
+
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
     data = request.json
     question = data.get("question", "").strip()
     transcript = data.get("transcript", "").strip()
     history = data.get("history", [])
+    context_files = data.get("context_files", [])
 
     if not question or not transcript:
         return jsonify({"error": "question and transcript required"}), 400
 
     # Build the prompt with context layers
     profile = load_profile()
+    file_context = load_context_files(context_files)
 
     system_parts = [
         "You are helping the user understand a video they watched.",
         "Answer their questions grounded in the transcript below.",
         "Be concise and direct. Use markdown formatting.",
         "If the transcript doesn't contain enough info to answer, say so.",
-        "When relevant, connect ideas to the user's background.",
+        "When relevant, connect ideas to the user's background and context files.",
     ]
 
     if profile:
         system_parts.append(f"\nHere is who the user is:\n{profile}")
+
+    if file_context:
+        system_parts.append(f"\nHere are relevant context files the user selected:\n{file_context}")
 
     system_parts.append(f"\nHere is the transcript:\n{transcript}")
 
@@ -944,6 +1140,21 @@ def api_status(job_id):
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--context", "-c", help="Path to context folder")
+    parser.add_argument("--port", "-p", type=int, default=4983)
+    args = parser.parse_args()
+
+    if args.context:
+        CONTEXT_DIR = Path(args.context).expanduser().resolve()
+        if not CONTEXT_DIR.exists():
+            print(f"  Warning: context folder not found: {CONTEXT_DIR}")
+            CONTEXT_DIR = None
+
     print("\n  TLDL — too long; didn't listen")
-    print("  http://localhost:4983\n")
-    app.run(host="127.0.0.1", port=4983, debug=False)
+    print(f"  http://localhost:{args.port}")
+    if CONTEXT_DIR:
+        print(f"  context: {CONTEXT_DIR}")
+    print()
+    app.run(host="127.0.0.1", port=args.port, debug=False)
